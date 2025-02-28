@@ -100,8 +100,8 @@ map<int, string> g_AssetIDtoAssetName;
 bool gUpdatedDataDescriptions = false;
 bool gNeedUpdatedDataDescriptions = true;
 
-string strDefaultLocal = "";
-string strDefaultMotive = "";
+string strDefaultLocal = "192.168.1.100";
+string strDefaultMotive = "192.168.1.101";
 
 // Frame Queue
 typedef struct MocapFrameWrapper
@@ -244,11 +244,11 @@ int main( int argc, char* argv[] )
         g_connectParams.multicastAddress = g_discoveredMulticastGroupAddr;
         if ( argc >= 2 )
         {
-            g_connectParams.serverAddress = argv[1];
+         //   g_connectParams.serverAddress = argv[1];
         }
         if ( argc >= 3 )
         {
-            g_connectParams.localAddress = argv[2];
+         //   g_connectParams.localAddress = argv[2];
         }
     }
 

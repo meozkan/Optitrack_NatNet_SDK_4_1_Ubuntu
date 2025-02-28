@@ -37,6 +37,15 @@ using namespace std;
 
 
 
+// Frame Queue
+typedef struct MocapFrameWrapper
+{
+    shared_ptr<sFrameOfMocapData> data;
+    double transitLatencyMillisec;
+    double clientLatencyMillisec;
+} MocapFrameWrapper;
+
+
 class Optitrack{
 private:
     // Connection variables
@@ -66,7 +75,7 @@ private:
     void UpdateDataToDescriptionMaps(sDataDescriptions* pDataDefs);
 
 public:
-    Optitrack(std::string ="10.42.1.100", std::string ="10.42.1.100", const std::string ="optotrack");
+    Optitrack(std::string ="192.168.1.101", std::string ="192.168.1.100", const std::string ="datasetOptitrack.csv");
     bool connect();
     bool run();
     bool disConnect();

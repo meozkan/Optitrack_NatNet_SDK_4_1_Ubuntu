@@ -9,49 +9,46 @@ bool Optitrack::isStart=false;
 void NATNET_CALLCONV DataHandler(sFrameOfMocapData* data, void* pUserData);    // receives data from the server
 void NATNET_CALLCONV MessageHandler(Verbosity msgType, const char* msg);      // receives NatNet error messages
 
-// Frame Queue
-typedef struct MocapFrameWrapper
-{
-    shared_ptr<sFrameOfMocapData> data;
-    double transitLatencyMillisec;
-    double clientLatencyMillisec;
-} MocapFrameWrapper;
 std::timed_mutex gNetworkQueueMutex;
-//std::deque<MocapFrameWrapper> gNetworkQueue;
-//const int kMaxQueueSize = 500;
-MocapFrameWrapper gNetworkFrame;
+std::deque<MocapFrameWrapper> gNetworkQueue;
+const int kMaxQueueSize = 2;
+//MocapFrameWrapper gNetworkFrame;
+bool gUpdatedDataDescriptions = false;
+bool gNeedUpdatedDataDescriptions = true;
+
+char g_discoveredMulticastGroupAddr[kNatNetIpv4AddrStrLenMax] = NATNET_DEFAULT_MULTICAST_ADDRESS;
 
 
 Optitrack::Optitrack(std::string server_ip, std::string local_ip, const std::string _filename)
     : g_pClient(NULL), Server_IP(server_ip), Local_IP(local_ip), g_pDataDefs(NULL), fileName(_filename), pollPeriodSpan((unsigned)200u)  
 {
+    // Print NatNet client version info
+    unsigned char ver[4];
+    NatNet_GetVersion( ver );
+    printf( "NatNet Sample Client (NatNet ver. %d.%d.%d.%d)\n", ver[0], ver[1], ver[2], ver[3] );
+
     // Install logging callback
     NatNet_SetLogCallback( MessageHandler );
 
     // Create NatNet client
     g_pClient = new NatNetClient();
 
+   
+
     // Manually specify Motive server IP/connection type
     g_connectParams.connectionType = ConnectionType_Multicast;
     g_connectParams.localAddress = Local_IP.c_str();
     g_connectParams.serverAddress = Server_IP.c_str();
+    g_connectParams.connectionType = ConnectionType_Multicast;
     g_connectParams.serverCommandPort = 1510;
     g_connectParams.serverDataPort = 1511;
-    char g_discoveredMulticastGroupAddr[kNatNetIpv4AddrStrLenMax] = NATNET_DEFAULT_MULTICAST_ADDRESS;
+    //char g_discoveredMulticastGroupAddr[kNatNetIpv4AddrStrLenMax] = NATNET_DEFAULT_MULTICAST_ADDRESS;
     g_connectParams.multicastAddress = g_discoveredMulticastGroupAddr;
 
 }
 
 bool Optitrack::connect()
 {
-    // Print NatNet client version info
-    unsigned char ver[4];
-    NatNet_GetVersion( ver );
-    printf( "NatNet Sample Client (NatNet ver. %d.%d.%d.%d)\n", ver[0], ver[1], ver[2], ver[3] );
-    
-    // Set the frame callback handler
-    g_pClient->SetFrameReceivedCallback( DataHandler, g_pClient );	// this function will receive data from the server
-
     // Connect to Motive
     int iResult = ConnectClient();
     if (iResult != ErrorCode_OK){
@@ -64,10 +61,14 @@ bool Optitrack::connect()
     }
 
     // Get latest asset list from Motive
-     if (!UpdateDataDescriptions(true)){
-         printf("ERROR : Unable to retrieve Data Descriptions from Motive.\n");
-         return false;
-     }
+    gUpdatedDataDescriptions = UpdateDataDescriptions(true);
+    if (!gUpdatedDataDescriptions)
+    {
+        printf("[SampleClient] ERROR : Unable to retrieve Data Descriptions from Motive.\n");
+    }
+
+      // Set the frame callback handler
+      g_pClient->SetFrameReceivedCallback( DataHandler, g_pClient );	// this function will receive data from the server
 
      //-------------------------
     //Configure the signal
@@ -112,7 +113,33 @@ bool Optitrack::connect()
 bool Optitrack::run()
 {
 
+    // If Motive Asset list has changed, update our lookup maps
+        if (gNeedUpdatedDataDescriptions)
+        {
+            gUpdatedDataDescriptions = UpdateDataDescriptions(false);
+            if (gUpdatedDataDescriptions)
+            {
+                gNeedUpdatedDataDescriptions = false;
+            }
+             printf("[SampleClient] INFO : Success to retrieve Data Descriptions from Motive.\n");
+        }
+
     int64_t prevtimePeriodForTimeStamp=0;
+
+     // Now let's block SIGUSR1
+    sigset_t sigset;
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &sigset, NULL);
+
+    // SIGUSR1 is now blocked and pending -- this call to sigwait will return
+    // immediately
+    int sig;
+    int result = sigwait(&sigset, &sig);
+    if(result == 0)
+        printf("sigwait got signal: %d\n", sig);
+
+    isStart=true;
 
     // acquire a single snapshot
     while(!isStop) {
@@ -122,22 +149,40 @@ bool Optitrack::run()
             
             
             // If Motive Asset list has changed, update our lookup maps
-            UpdateDataDescriptions(false);
+            //UpdateDataDescriptions(false);
 
             // Add data from the network frame into our record frame in order to quickly
             // free up access to the network frame.
-            MocapFrameWrapper recordFrame;
+            //MocapFrameWrapper recordFrame;
             //std::deque<MocapFrameWrapper> displayQueue;
     
-            if (gNetworkQueueMutex.try_lock_for(std::chrono::milliseconds(5))){
-                recordFrame=gNetworkFrame;
+            //if (gNetworkQueueMutex.try_lock_for(std::chrono::milliseconds(5))){
+            //    recordFrame=gNetworkFrame;
+            //    gNetworkQueueMutex.unlock();
+            //}
+            // Add data from the network queue into our display queue in order to quickly
+            // free up access to the network queue.
+
+            std::deque<MocapFrameWrapper> recordQueue;
+            if (gNetworkQueueMutex.try_lock_for(std::chrono::milliseconds(5)))
+            {
+                for (MocapFrameWrapper f : gNetworkQueue)
+                {
+                    recordQueue.push_back(f);
+                }
+
+                // Release all frames in network queue
+                gNetworkQueue.clear();
                 gNetworkQueueMutex.unlock();
             }
 
+            //cout<<"Size: "<<recordQueue.size()<<endl;
+            //cout<<"msec: "<<recordQueue.back().clientLatencyMillisec<<endl;
 
             // Now we can take our time displaying our data without
             // worrying about interfering with the network processing queue.
-            sFrameOfMocapData* data = recordFrame.data.get();
+            sFrameOfMocapData* data = recordQueue.back().data.get();
+
 
 
             if (fileRecorder->is_open()){
@@ -175,7 +220,7 @@ bool Optitrack::run()
                 const double softwareLatencyMillisec = (softwareLatencyHostTicks * 1000) / static_cast<double>(g_serverDescription.HighResClockFrequency);
                 (*fileRecorder)<<softwareLatencyMillisec<<", "; //Record Motive_SW_Latency(ms)
                
-                (*fileRecorder)<<recordFrame.transitLatencyMillisec<<", "; //Record Motive_SW_Latency(ms)
+                (*fileRecorder)<<recordQueue.back().transitLatencyMillisec<<", "; //Record Motive_SW_Latency(ms)
 
                 (*fileRecorder)<<data->RigidBodies[0].MeanError*1000.0f<<", "; //Record Mean error(mm)
 
@@ -185,10 +230,17 @@ bool Optitrack::run()
                 (*fileRecorder)<<data->RigidBodies[0].qx<<", "; //Record QX(rad)
                 (*fileRecorder)<<data->RigidBodies[0].qy<<", "; //Record QY(rad)
                 (*fileRecorder)<<data->RigidBodies[0].qz<<", "; //Record QZ(rad)
-                (*fileRecorder)<<data->RigidBodies[0].qw<<", "; //Record QW(rad)
-
+                (*fileRecorder)<<data->RigidBodies[0].qw<<"\n"; //Record QW(rad)
             }
-
+ 
+            
+            // Release all frames (and frame data) in the display queue
+            for (MocapFrameWrapper f : recordQueue)
+            {
+                NatNet_FreeFrame(f.data.get());
+            }
+            recordQueue.clear();
+            
             //Wait for keeping the period
             const auto timeSinceLastSnap = std::chrono::steady_clock::now() - lastSnapTime;
 
@@ -196,9 +248,7 @@ bool Optitrack::run()
                 auto timeToWait = pollPeriodSpan - timeSinceLastSnap;
                 std::this_thread::sleep_for(timeToWait);
             }
-
-            NatNet_FreeFrame(recordFrame.data.get());
-            
+           
         } //if(isStart){
     } //while(!isStop) {
 
@@ -233,13 +283,19 @@ bool Optitrack::disConnect()
     return true;
 }
 
+
 void Optitrack::SignalHandler(int sig)
 {
-    if(sig==SIGINT)
+    if(sig==SIGINT){
+        std::cout<<"SIGINT: Exiting..."<<std::endl;
         isStop=true;
-    if(sig==SIGUSR1)
+    }    
+    if(sig==SIGUSR1){
+        std::cout<<"SIGUSR1: Recording..."<<std::endl;
         isStart=true;
+    }
 }
+
 
 //--------------------------------------------------
 // NatNet Sample Client functions
@@ -249,6 +305,8 @@ int Optitrack::ConnectClient()
 {
     // Disconnect from any previous server (if connected)
     g_pClient->Disconnect();
+
+    //std::cout<<"server;:"<<g_connectParams.serverAddress<<std::endl;
 
     // Connect to NatNet server (e.g. Motive)
     int retCode = g_pClient->Connect( g_connectParams );
@@ -302,11 +360,13 @@ bool Optitrack::UpdateDataDescriptions(bool printToConsole)
     }
 
     // Retrieve Data Descriptions from Motive
-    printf("\n\n[SampleClient] Requesting Data Descriptions...\n");
+    //printf("\n\n[SampleClient] Requesting Data Descriptions...\n");
     int iResult = g_pClient->GetDataDescriptionList(&g_pDataDefs);
     if (iResult != ErrorCode_OK || g_pDataDefs == NULL){
         return false;
     }
+   
+
     //else{
     //    if (printToConsole)
     //   {
@@ -314,7 +374,6 @@ bool Optitrack::UpdateDataDescriptions(bool printToConsole)
     //    }
     //}
     UpdateDataToDescriptionMaps(g_pDataDefs);
-
     return true;
 
 }
@@ -472,26 +531,27 @@ void NATNET_CALLCONV DataHandler(sFrameOfMocapData* data, void* pUserData)
     if (gNetworkQueueMutex.try_lock_for(std::chrono::milliseconds(5)))
     {
         //Just keep the last data
-        NatNet_FreeFrame(gNetworkFrame.data.get());
-        gNetworkFrame=f;
+        //NatNet_FreeFrame(gNetworkFrame.data.get());
+        //gNetworkFrame=f;
 
 
-        //gNetworkQueue.push_back(f);
+        gNetworkQueue.push_back(f);
+        //cout<<"f "<<f.clientLatencyMillisec<<endl;
 
         // Maintain a cap on the queue size, removing oldest as necessary
-        //while ((int)gNetworkQueue.size() > kMaxQueueSize)
-        //{
-        //    f = gNetworkQueue.front();
-        //    NatNet_FreeFrame(f.data.get());
-        //    gNetworkQueue.pop_front();
-        //}
+        while ((int)gNetworkQueue.size() > kMaxQueueSize)
+        {
+            f = gNetworkQueue.front();
+            NatNet_FreeFrame(f.data.get());
+            gNetworkQueue.pop_front();
+        }
         gNetworkQueueMutex.unlock();
     }
     else
     {
         // Unable to lock the frame queue and we chose not to wait - drop the frame and notify
         NatNet_FreeFrame(pDataCopy.get());
-        printf("\nFrame dropped (Frame : %d)\n", f.data->iFrame);
+        //printf("\nFrame dropped (Frame : %d)\n", f.data->iFrame);
     }
 
     return;
